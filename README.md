@@ -10,39 +10,59 @@ This platform captures detailed keystroke metrics including:
 - Typing patterns and inter-key intervals
 - Session and participant tracking
 
-Data is initially stored in CSV files and can later be migrated to Databricks for ML model training.
+Data is stored both locally in CSV files (organized by user and session) and in Databricks Delta tables for real-time analytics and ML model training.
 
 ## Architecture
 
-- **Backend**: FastAPI (Python) - REST API for receiving and storing keystroke data
+- **Backend**: FastAPI (Python) - REST API with JWT authentication for receiving and storing keystroke data
 - **Frontend**: React - Typing test interface with keystroke event capture
-- **Storage**: CSV files (daily rotation) - Ready for Databricks ingestion
+- **Storage**: 
+  - CSV files organized by user and session: `data/{user_id}/{timestamp}/`
+  - Databricks Delta tables for real-time ingestion and analytics
+- **Authentication**: JWT-based user authentication with secure password hashing
 
 ## Project Structure
 
 ```
 databricks_hack/
-├── backend/                 # Python FastAPI backend
-│   ├── main.py             # API endpoints
-│   ├── models.py           # Pydantic data models
+├── backend/                      # Python FastAPI backend
+│   ├── main.py                  # API endpoints
+│   ├── models.py                 # Pydantic data models
+│   ├── config.py                 # Configuration (loads from .env)
+│   ├── auth.py                   # JWT authentication logic
+│   ├── databricks_client/        # Databricks integration
+│   │   ├── client.py            # Databricks SQL client
+│   │   └── ingestion.py         # Data ingestion pipeline
 │   ├── storage/
-│   │   └── csv_writer.py   # CSV persistence layer
-│   └── requirements.txt    # Python dependencies
-├── frontend/               # React frontend
+│   │   └── csv_writer.py        # CSV persistence layer
+│   ├── test/                    # Test scripts
+│   │   ├── test_databricks_connection.py
+│   │   ├── test_data_insertion.py
+│   │   └── ...
+│   ├── upload_csv_to_databricks.py  # Standalone CSV upload script
+│   ├── .env.example             # Environment variables template
+│   ├── requirements.txt         # Python dependencies
+│   └── run.sh                   # Backend startup script
+├── frontend/                     # React frontend
 │   ├── src/
 │   │   ├── components/
-│   │   │   └── TypingTest.js  # Main typing test component
+│   │   │   ├── Auth.js          # Authentication component
+│   │   │   └── TypingTest.js    # Main typing test component
 │   │   └── App.js
 │   └── package.json
-├── data/                   # CSV data files (created at runtime)
-│   ├── keystrokes_YYYYMMDD.csv
-│   └── sessions_YYYYMMDD.csv
+├── data/                        # CSV data files (created at runtime)
+│   └── {user_id}/               # Per-user folders
+│       └── {timestamp}/         # Per-session folders
+│           ├── keystrokes.csv
+│           └── sessions.csv
 ├── scripts/
-│   └── preview_csv.py      # Utility to preview collected data
+│   └── preview_csv.py           # Utility to preview collected data
 ├── notebooks/
 │   └── databricks_ingest.ipynb  # Databricks ingestion notebook
 ├── shared/
-│   └── schema.md          # Data schema documentation
+│   └── schema.md                # Data schema documentation
+├── SETUP_DATABRICKS.md          # Databricks setup guide
+├── QUICKSTART.md                # Quick start guide
 └── README.md
 ```
 
@@ -52,7 +72,7 @@ databricks_hack/
 
 - Python 3.8+
 - Node.js 16+ and npm
-- (Optional) Databricks account for future data migration
+- Databricks account (for real-time data ingestion)
 
 ### Backend Setup
 
@@ -72,19 +92,43 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-4. Set environment variables (optional):
-```bash
-export DATA_DIR=../data  # Default is ./data
-```
+4. **Configure environment variables** (required):
+   
+   Create a `.env` file in the `backend/` directory:
+   ```bash
+   cp .env.example .env
+   ```
+   
+   Edit `.env` and add your Databricks credentials:
+   ```bash
+   # Databricks Configuration (REQUIRED)
+   DATABRICKS_SERVER_HOSTNAME=your-databricks-server-hostname.cloud.databricks.com
+   DATABRICKS_HTTP_PATH=/sql/1.0/warehouses/your-warehouse-id
+   DATABRICKS_ACCESS_TOKEN=your-databricks-access-token
+   
+   # JWT Configuration
+   JWT_SECRET_KEY=your-secret-key-change-in-production
+   
+   # Optional: Data directory (defaults to ../data)
+   DATA_DIR=../data
+   
+   # Optional: Users database path (defaults to users.json)
+   USERS_DB_PATH=users.json
+   ```
+   
+   **Important**: Never commit the `.env` file to version control. It's already in `.gitignore`.
 
-5. Run the backend server:
+5. Run the backend server (from project root):
 ```bash
+cd ..  # Return to project root
 uvicorn backend.main:app --reload --port 8000
 ```
 
 The API will be available at `http://localhost:8000`
 
 API documentation: `http://localhost:8000/docs`
+
+**Note**: The backend will fail to start if Databricks credentials are not set in `.env`. See `SETUP_DATABRICKS.md` for detailed Databricks setup instructions.
 
 ### Frontend Setup
 
@@ -117,10 +161,13 @@ The frontend will be available at `http://localhost:3000`
 1. Start the backend server (see Backend Setup above)
 2. Start the frontend server (see Frontend Setup above)
 3. Open `http://localhost:3000` in your browser
-4. Read and accept the consent form
-5. Click "Start Test" to begin
-6. Type the displayed sentences
-7. Complete all sentences to finish the test
+4. **Register or Login**: Create an account or login with existing credentials
+5. Read and accept the consent form
+6. Click "Start Test" to begin
+7. Type the displayed sentences
+8. Complete all sentences to finish the test
+
+**Note**: All API endpoints (except registration) require authentication. Users must register/login before starting a test.
 
 ### Viewing Collected Data
 
@@ -146,12 +193,31 @@ Date: 20240115
 
 ### Data Files
 
-CSV files are created in the `data/` directory (or as specified by `DATA_DIR`):
+CSV files are organized by user and session in the `data/` directory:
 
-- **keystrokes_YYYYMMDD.csv**: Individual keystroke events
-- **sessions_YYYYMMDD.csv**: Session summaries
+```
+data/
+  {user_id_1}/
+    20241115_143022/
+      keystrokes.csv
+      sessions.csv
+    20241115_150145/
+      keystrokes.csv
+      sessions.csv
+  {user_id_2}/
+    20241115_160000/
+      keystrokes.csv
+      sessions.csv
+```
 
-Files are rotated daily to manage size and enable batch processing.
+Each session creates a unique timestamped folder containing:
+- **keystrokes.csv**: Individual keystroke events for that session
+- **sessions.csv**: Session summary statistics
+
+This organization allows for:
+- Per-user data isolation
+- Easy session tracking
+- Simple batch uploads to Databricks
 
 ## Data Schema
 
@@ -172,13 +238,66 @@ Each keystroke event includes:
 
 ## API Endpoints
 
-### POST `/api/session`
+### Authentication Endpoints
+
+#### POST `/api/auth/register`
+Register a new user account.
+
+**Request:**
+```json
+{
+  "email": "user@example.com",
+  "password": "secure-password"
+}
+```
+
+**Response:**
+```json
+{
+  "user_id": "uuid-here",
+  "email": "user@example.com",
+  "created_at": "2024-01-15T10:30:00"
+}
+```
+
+#### POST `/api/auth/login`
+Login and receive JWT access token.
+
+**Request:**
+```json
+{
+  "email": "user@example.com",
+  "password": "secure-password"
+}
+```
+
+**Response:**
+```json
+{
+  "access_token": "jwt-token-here",
+  "token_type": "bearer",
+  "user": {
+    "user_id": "uuid-here",
+    "email": "user@example.com",
+    "created_at": "2024-01-15T10:30:00"
+  }
+}
+```
+
+#### GET `/api/auth/me`
+Get current authenticated user info (requires Bearer token in Authorization header).
+
+### Test Management Endpoints
+
+All test endpoints require authentication (Bearer token in Authorization header).
+
+#### POST `/api/session`
 Create a new typing test session.
 
 **Request:**
 ```json
 {
-  "participant_id": null  // Optional, will be generated if not provided
+  "question_count": 10  // Number of sentences in the test
 }
 ```
 
@@ -187,11 +306,22 @@ Create a new typing test session.
 {
   "participant_id": "uuid-here",
   "test_section_id": "uuid-here",
-  "message": "Session created successfully"
+  "message": "Session created successfully with 10 questions"
 }
 ```
 
-### POST `/api/keystrokes`
+#### POST `/api/test-section`
+Create a new test section for a sentence.
+
+**Request:**
+```json
+{
+  "participant_id": "uuid",
+  "sentence": "The quick brown fox..."
+}
+```
+
+#### POST `/api/keystrokes`
 Submit a batch of keystroke events.
 
 **Request:**
@@ -212,34 +342,91 @@ Submit a batch of keystroke events.
 }
 ```
 
-### GET `/api/session/{test_section_id}/stats`
+#### POST `/api/sentence-complete`
+Mark a sentence as complete and trigger Databricks ingestion.
+
+#### POST `/api/end-test`
+End the test session and finalize all data.
+
+#### GET `/api/session/{test_section_id}/stats`
 Get statistics for a session.
 
-### GET `/api/health`
-Health check endpoint.
+#### GET `/api/health`
+Health check endpoint (no authentication required).
 
-## Databricks Migration
+## Databricks Integration
 
-When ready to migrate to Databricks:
+This platform includes real-time Databricks integration for data ingestion and analytics.
 
-1. Upload CSV files to a location accessible by Databricks (DBFS, S3, Azure Blob, etc.)
-2. Open `notebooks/databricks_ingest.ipynb` in Databricks
-3. Update configuration paths
-4. Run the ingestion cells to create Delta tables and load data
+### Features
 
-See the notebook for detailed instructions and example queries.
+- **Real-time Ingestion**: Data is automatically sent to Databricks after each sentence completion
+- **Delta Tables**: Data is stored in Delta tables (`keystrokes` and `sessions`) for efficient querying
+- **Upsert Logic**: Re-running tests replaces existing data (not appends)
+- **Automatic Table Creation**: Tables are created automatically on first use
+
+### Setup
+
+1. **Configure Databricks credentials** in `backend/.env` (see Backend Setup above)
+2. **Start SQL Warehouse**: Ensure your Databricks SQL warehouse is running
+3. **Test Connection**: Run the connection test script:
+   ```bash
+   cd backend
+   python test/test_databricks_connection.py
+   ```
+
+### Data Upload Options
+
+#### Option 1: Real-time Ingestion (Automatic)
+Data is automatically uploaded to Databricks during the typing test. No manual steps required.
+
+#### Option 2: Manual CSV Upload
+Upload existing CSV files using the standalone script:
+
+```bash
+cd backend
+python upload_csv_to_databricks.py ../data/{user_id}/{timestamp}/keystrokes.csv
+```
+
+#### Option 3: Notebook-based Ingestion
+Use the Jupyter notebook for batch processing:
+
+1. Open `notebooks/databricks_ingest.ipynb` in Databricks
+2. Update configuration paths
+3. Run the ingestion cells
+
+### Databricks Tables
+
+**keystrokes table:**
+- participant_id, test_section_id, sentence, user_input
+- keystroke_id, press_time, release_time, letter, keycode
+- session_timestamp, created_at
+
+**sessions table:**
+- participant_id, test_section_id, created_at
+- sentence_count, total_keystrokes, average_wpm
+- session_timestamp
+
+See `SETUP_DATABRICKS.md` for detailed setup instructions and troubleshooting.
 
 ## Development
 
 ### Running Tests
 
-Backend tests (to be added):
+**Backend Connection Tests:**
 ```bash
 cd backend
-pytest
+# Test Databricks connection
+python test/test_databricks_connection.py
+
+# Test data insertion
+python test/test_data_insertion.py
+
+# Full integration test
+python test/test_databricks.py
 ```
 
-Frontend tests:
+**Frontend tests:**
 ```bash
 cd frontend
 npm test
@@ -273,6 +460,20 @@ MIT License - See LICENSE file for details
 2. Create a feature branch
 3. Make your changes
 4. Submit a pull request
+
+## Additional Documentation
+
+- **Quick Start**: See `QUICKSTART.md` for a 5-minute setup guide
+- **Databricks Setup**: See `SETUP_DATABRICKS.md` for detailed Databricks configuration
+- **Data Schema**: See `shared/schema.md` for complete data schema documentation
+- **File Locations**: See `FILE_LOCATIONS.md` for project file organization
+
+## Security Notes
+
+- **Environment Variables**: All sensitive credentials (Databricks tokens, JWT secrets) must be stored in `.env` file
+- **Never Commit Secrets**: The `.env` file is in `.gitignore` - never commit it to version control
+- **Use `.env.example`**: Copy `.env.example` to `.env` and fill in your actual values
+- **JWT Secret**: Change the default JWT secret key in production
 
 ## Support
 
